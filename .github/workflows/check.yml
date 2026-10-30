@@ -1,0 +1,39 @@
+# Runs on every push and pull request. Windows comes first: the scripts are built for a Windows 365 Cloud PC.
+name: check
+
+# Pushes to main, and pull requests: a push to a pull request's branch would otherwise run everything twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # The lint and type-check tools need Node 22 or later.
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  # The scripts still run on Node 18; the tests need no install.
+  test-node-18:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 18
+      - run: node --test

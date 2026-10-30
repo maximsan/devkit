@@ -1,0 +1,192 @@
+// @ts-check
+// Builds real repositories in a temp folder: one shared "remote" plus clones in
+// different states, then checks that every repo is attempted and classified correctly.
+
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { main, mapPool, parseArgs, plural, pullAll } from '../../lib/commands/gpall.mjs';
+import {
+  mapPool as sharedMapPool, parseArgs as sharedParseArgs, plural as sharedPlural,
+} from '../../lib/shared/index.mjs';
+import { runCli, tempWorkspace, testContext } from '../setup.mjs';
+import { git, makeRepo } from '../utils.mjs';
+
+const { root: workspace, cleanup } = tempWorkspace('gpall');
+
+// The folder the script runs in (contains the clones).
+const root = join(workspace, 'repos');
+
+/**
+ * Write a file and commit it.
+ * @param {string} repo  the repo folder
+ * @param {string} file  file name inside the repo
+ * @param {string} content  text to write
+ * @param {string} message  commit message
+ */
+function commitFile(repo, file, content, message) {
+  writeFileSync(join(repo, file), content);
+  git(repo, 'add', file);
+  git(repo, 'commit', '-q', '-m', message);
+}
+
+before(() => {
+  mkdirSync(root);
+
+  // Shared remote with one commit.
+  const remote = join(workspace, 'remote.git');
+  const seed = join(workspace, 'seed');
+
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  execFileSync('git', ['clone', '-q', remote, seed], { stdio: 'pipe' });
+  git(seed, 'checkout', '-q', '-b', 'main');
+  commitFile(seed, 'a.txt', 'v1\n', 'c1');
+  git(seed, 'push', '-q', 'origin', 'main');
+
+  // Git for Windows checks files out with CRLF line endings by default; the clones keep the committed ones.
+  for (const name of ['clean', 'diverged', 'dirty-conflict', 'broken-remote', 'read-only']) {
+    execFileSync('git', ['clone', '-q', '-c', 'core.autocrlf=false', remote, join(root, name)]);
+  }
+
+  git(join(root, 'broken-remote'), 'remote', 'set-url', 'origin', join(workspace, 'does-not-exist.git'));
+  git(join(root, 'read-only'), 'branch', '--unset-upstream');
+  execFileSync('git', ['init', '-q', join(root, 'no-upstream')]);
+  mkdirSync(join(root, 'not-a-repo'));
+
+  // New commit on the remote that every clone is now behind.
+  commitFile(seed, 'a.txt', 'v2\n', 'c2');
+  git(seed, 'push', '-q', 'origin', 'main');
+
+  // Local commit -> branch diverges from the remote.
+  commitFile(join(root, 'diverged'), 'local.txt', 'mine\n', 'local');
+
+  // Uncommitted edit to the same file the remote changed.
+  writeFileSync(join(root, 'dirty-conflict', 'a.txt'), 'my edit\n');
+});
+
+after(cleanup);
+
+test('pullAll tries every repo, skips folders without .git and branches without upstream, keeps going', async () => {
+  /** @type {string[]} */
+  const seen = [];
+  const results = await pullAll(root, {
+    jobs: 2,
+    onResult: (result) => {
+      seen.push(result.name);
+    },
+  });
+  const byName = Object.fromEntries(results.map((result) => [result.name, result]));
+
+  assert.deepEqual(results.map((result) => result.name), [
+    'broken-remote', 'clean', 'dirty-conflict', 'diverged', 'no-upstream', 'read-only',
+  ]);
+  assert.equal(seen.length, 6);
+
+  assert.equal(byName.clean.ok, true);
+  assert.equal(readFileSync(join(root, 'clean', 'a.txt'), 'utf8'), 'v2\n');
+
+  for (const name of ['no-upstream', 'read-only']) {
+    assert.equal(byName[name].skip, 'no upstream branch', `${name} should be skipped`);
+    assert.equal(byName[name].ok, true, `${name} should not count as failed`);
+  }
+
+  // A skipped repo is not pulled, though its remote has a newer commit.
+  assert.equal(readFileSync(join(root, 'read-only', 'a.txt'), 'utf8'), 'v1\n');
+
+  for (const name of ['diverged', 'dirty-conflict', 'broken-remote']) {
+    assert.equal(byName[name].ok, false, `${name} should fail`);
+    assert.notEqual(byName[name].output, '', `${name} should carry git's error text`);
+  }
+
+  // Failed repos are left untouched.
+  assert.equal(readFileSync(join(root, 'dirty-conflict', 'a.txt'), 'utf8'), 'my edit\n');
+  assert.equal(git(join(root, 'diverged'), 'log', '-1', '--format=%s').toString().trim(), 'local');
+});
+
+test('main prints a line per repo, then the failed repos with git\'s error text', async () => {
+  const { context, output } = testContext({ cwd: root, stateDir: join(workspace, 'state') });
+
+  assert.equal(await main(['2'], context), 1);
+  assert.match(output(), /^ok {4}clean {11}main$/m);
+  assert.match(output(), /^FAIL {2}broken-remote {3}main$/m);
+  assert.match(output(), /^skip {2}read-only {7}main {2}no upstream branch$/m);
+  assert.match(output(), /^Done: 6 repos, 2 skipped, 3 failed:$/m);
+  assert.doesNotMatch(output(), /^--- read-only$/m);
+  assert.match(output(), /^--- diverged$/m);
+});
+
+test('main without repos says so and succeeds', async () => {
+  const empty = join(workspace, 'empty');
+
+  mkdirSync(empty);
+
+  const { context, output } = testContext({ cwd: empty, stateDir: join(workspace, 'state') });
+
+  assert.equal(await main([], context), 0);
+  assert.match(output(), /^No git repositories found under /);
+});
+
+test('main says nothing was pulled when every repo was skipped', async () => {
+  const alone = join(workspace, 'alone');
+
+  makeRepo(alone, 'local-only');
+
+  const { context, output } = testContext({ cwd: alone, stateDir: join(workspace, 'state') });
+
+  assert.equal(await main([], context), 0);
+  assert.match(output(), /^Done: 1 repo, 1 skipped, nothing pulled\.$/m);
+});
+
+test('parseArgs: optional job count or --help; anything else is refused', () => {
+  assert.deepEqual(parseArgs([]), { help: false, jobs: 8 });
+  assert.deepEqual(parseArgs(['3']), { help: false, jobs: 3 });
+  assert.equal(parseArgs(['--help']).help, true);
+
+  for (const bad of [['abc'], ['0'], ['2.5'], ['4', '4'], ['--apply']]) {
+    assert.throws(() => parseArgs(bad), /job count/);
+  }
+});
+
+test('as a process: --help prints the usage', () => {
+  const result = runCli(['pull', '--help'], { cwd: root, stateDir: join(workspace, 'state') });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /git pull --ff-only/);
+});
+
+test('the copies in gpall.mjs behave like the shared code: plural, mapPool and the job count', async () => {
+  for (const count of [0, 1, 2]) {
+    assert.equal(plural(count, 'repo'), sharedPlural(count, 'repo'));
+  }
+
+  /**
+   * A worker that finishes in reverse order, so the results' order is tested.
+   * @param {number} value  the input
+   * @returns {Promise<number>} the input doubled
+   */
+  const slowFirst = (value) => new Promise((resolve) => {
+    setTimeout(() => resolve(value * 2), 10 - value);
+  });
+  const inputs = [1, 2, 3, 4, 5];
+
+  assert.deepEqual(await mapPool(inputs, 2, slowFirst), await sharedMapPool(inputs, 2, slowFirst));
+
+  for (const argv of [['3'], ['0'], ['-1'], ['1.5'], ['x'], ['007']]) {
+    /**
+     * The job count a parser gives, or "refused".
+     * @param {(args: string[]) => { jobs: number }} parse  a parser
+     * @returns {number | string} the job count
+     */
+    const jobsOf = (parse) => {
+      try {
+        return parse(argv).jobs;
+      } catch {
+        return 'refused';
+      }
+    };
+
+    assert.equal(jobsOf(parseArgs), jobsOf((args) => sharedParseArgs(args, { defaults: {} })), argv[0]);
+  }
+});
