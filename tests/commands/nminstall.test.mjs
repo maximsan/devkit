@@ -4,9 +4,10 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runShell } from '../../lib/shared/processes.mjs';
 import { detectPackageManager, main } from '../../lib/commands/nminstall.mjs';
 import { runCli, tempWorkspace, testContext } from '../setup.mjs';
-import { linkFolder, makeRepo, write } from '../utils.mjs';
+import { git, linkFolder, makeRepo, write } from '../utils.mjs';
 
 const { root: workspace, cleanup } = tempWorkspace('nminstall');
 const stateDir = join(workspace, 'state');
@@ -119,4 +120,107 @@ test('as a process: prints the plan', () => {
 
   assert.equal(dryRun.status, 0, dryRun.stderr);
   assert.match(dryRun.stdout, /do {4}app .*npm ci/);
+});
+
+test('a workspace node_modules containing tracked files blocks the whole install', async () => {
+  const root = join(workspace, 'workspace-tracked');
+  const repo = makeRepo(root, 'app', { ignore: '' });
+
+  write(join(repo, 'package.json'), JSON.stringify({ name: 'app', workspaces: ['packages/*'] }));
+  write(join(repo, 'package-lock.json'), '{}');
+  write(join(repo, 'packages', 'web', 'package.json'), '{"name":"web"}');
+  write(join(repo, 'packages', 'web', 'node_modules', 'keep.js'), 'keep');
+
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'workspace');
+
+  const { context, output } = testContext({ cwd: root, stateDir });
+
+  await main(['--dry-run'], context);
+  assert.match(output(), /keep {2}app .*packages\/web\/node_modules.*tracked/);
+  assert.equal(readFileSync(join(repo, 'packages', 'web', 'node_modules', 'keep.js'), 'utf8'), 'keep');
+});
+
+test('unsupported workspace patterns and linked workspace paths refuse installation', async () => {
+  const root = join(workspace, 'workspace-unsafe');
+  const complex = makeRepo(root, 'complex');
+  const linked = makeRepo(root, 'linked-workspace');
+  const outside = join(workspace, 'external-workspace');
+
+  write(join(complex, 'package.json'), JSON.stringify({ workspaces: ['packages/{a,b}'] }));
+  write(join(complex, 'package-lock.json'), '{}');
+  write(join(linked, 'package.json'), JSON.stringify({ workspaces: ['packages/*'] }));
+  write(join(linked, 'package-lock.json'), '{}');
+  write(join(outside, 'package.json'), '{}');
+  mkdirSync(join(linked, 'packages'), { recursive: true });
+  linkFolder(outside, join(linked, 'packages', 'external'));
+
+  const { context, output } = testContext({ cwd: root, stateDir });
+
+  await main(['--dry-run'], context);
+  assert.match(output(), /keep {2}complex .*unsupported workspace pattern/);
+  assert.match(output(), /keep {2}linked-workspace .*workspace path is a link/);
+});
+
+test('rechecks workspace folders after confirmation before touching the root', async () => {
+  const root = join(workspace, 'workspace-recheck');
+  const repo = makeRepo(root, 'app', { ignore: 'node_modules/\n' });
+  const target = join(repo, 'packages', 'web', 'node_modules');
+
+  write(join(repo, 'package.json'), JSON.stringify({ workspaces: ['packages/*'] }));
+  write(join(repo, 'package-lock.json'), '{}');
+  write(join(repo, 'packages', 'web', 'package.json'), '{}');
+  write(join(repo, 'node_modules', 'keep.js'), 'root');
+  write(join(target, 'a.js'), 'a');
+
+  const { context, output } = testContext({ cwd: root, stateDir });
+
+  context.confirm = async () => {
+    write(join(target, 'nested', '.git', 'HEAD'), 'nested');
+
+    return true;
+  };
+
+  assert.equal(await main([], context), 1);
+  assert.match(output(), /nested git repo/);
+  assert.equal(readFileSync(join(repo, 'node_modules', 'keep.js'), 'utf8'), 'root');
+  assert.equal(readFileSync(join(target, 'a.js'), 'utf8'), 'a');
+});
+
+test('a safe workspace install removes existing workspace modules through the checked path', async () => {
+  const root = join(workspace, 'workspace-install');
+  const repo = makeRepo(root, 'app');
+  const target = join(repo, 'packages', 'web', 'node_modules');
+
+  write(join(repo, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+  write(join(repo, 'packages', 'web', 'package.json'), JSON.stringify({ name: 'web', version: '1.0.0' }));
+
+  const lock = await runShell('npm install --package-lock-only --ignore-scripts --offline', { cwd: repo });
+
+  assert.equal(lock.ok, true, lock.output);
+  write(join(repo, 'node_modules', 'stale.js'), 'stale');
+  write(join(target, 'stale.js'), 'stale');
+
+  const { context, output } = testContext({ cwd: root, stateDir });
+
+  assert.equal(await main([], context), 0, output());
+  assert.equal(existsSync(join(repo, 'node_modules', 'stale.js')), false);
+  assert.equal(existsSync(join(target, 'stale.js')), false);
+});
+
+test('a recursive workspace pattern checks deeper package folders', async () => {
+  const root = join(workspace, 'workspace-recursive');
+  const repo = makeRepo(root, 'app', { ignore: '' });
+
+  write(join(repo, 'package.json'), JSON.stringify({ workspaces: ['packages/**'] }));
+  write(join(repo, 'package-lock.json'), '{}');
+  write(join(repo, 'packages', 'area', 'web', 'package.json'), '{}');
+  write(join(repo, 'packages', 'area', 'web', 'node_modules', 'tracked.js'));
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'workspace');
+
+  const { context, output } = testContext({ cwd: root, stateDir });
+
+  await main(['--dry-run'], context);
+  assert.match(output(), /packages\/area\/web\/node_modules.*tracked/);
 });

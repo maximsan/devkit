@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SafetyError } from '../../lib/shared/errors.mjs';
-import { askInTerminal, isConfirmed } from '../../lib/shared/state.mjs';
+import { askInTerminal, askSecretInTerminal, isConfirmed } from '../../lib/shared/state.mjs';
 import { fakeTerminal, KEYS } from '../terminal.mjs';
 
 test('the y/N question goes ahead only on "y" or "yes"', () => {
@@ -37,4 +37,17 @@ test('without an interactive terminal the question is refused', async () => {
   const { input, output } = fakeTerminal({ isTTY: false });
 
   await assert.rejects(askInTerminal('Delete?', { input, output }), SafetyError);
+});
+
+test('secret prompt hides typed input and refuses non-terminals', async () => {
+  const { input, output, type, shown } = fakeTerminal();
+  const pending = askSecretInTerminal({ input, output });
+
+  type('npm_secret123\r');
+  assert.equal(await pending, 'npm_secret123');
+  assert.doesNotMatch(shown(), /npm_secret123/);
+
+  const nonterminal = fakeTerminal({ isTTY: false });
+
+  await assert.rejects(askSecretInTerminal(nonterminal), SafetyError);
 });

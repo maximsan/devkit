@@ -25,9 +25,9 @@ A folder is deleted only if all of these hold. Such a folder is a [repo folder](
 
 The search never enters dot-folders (`.venv`, `.yarn`, …), `node_modules` or nested repos.
 
-Before `install` installs a repo, it checks the `node_modules` folder at the repo root. It uses the same rules as for a [repo folder](GLOSSARY.md), because [`npm ci`](https://docs.npmjs.com/cli/v11/commands/npm-ci) deletes this folder and Yarn changes it. If the folder does not pass a check, the plan shows it as kept, and `install` does not install the repo.
+Before `install` installs a repo, it checks the root and workspace `node_modules` folders using the same rules. It resolves literal workspace paths and `*` or `**` path components. A workspace pattern it cannot resolve, an unreadable path, or a link on a workspace path causes the repo to be skipped. The checks run again after confirmation. For npm, existing folders are removed through the safe removal path before `npm ci`; Yarn changes them itself. If a later removal fails, earlier folders may already have been removed.
 
-`install` does not check the `node_modules` folders of workspace packages. A workspace package is a package in a subfolder of the repo, with its own `package.json`. `npm ci` also deletes the contents of these folders.
+The checks do not confine what package-manager configuration or install scripts do. A concurrent process can also change a path after it is checked.
 
 ## Links
 
@@ -61,6 +61,7 @@ Only [temp entries](GLOSSARY.md) with nothing newer than the cutoff are deleted.
 
 This applies to `token` only.
 
+- the new token is entered at a hidden terminal prompt, not in a command-line argument;
 - only the text after `=` in the `_authToken=` line changes; every other byte of the file stays the same, including line endings;
 - a file with more than one `_authToken=` line is left unchanged with a warning, since each registry probably needs its own token;
 - an `.npmrc` that is a link is left alone, because it could point to your user-wide `~/.npmrc`;

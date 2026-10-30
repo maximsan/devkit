@@ -67,28 +67,17 @@ Run the commands from your repos folder, for example `devkit nmclean`. Each comm
 Other ways to run them:
 
 - `--dry-run` only prints the plan. Without a terminal, for example when the output goes to a file, the commands only print the plan too.
-- `--yes` takes everything, without the list and without the y/N question. It is the only way to act where no person can answer.
+- `--yes` takes everything, without the list and without the y/N question. The token command still requires a terminal for hidden token entry.
 - `nmclean --only` narrows the plan to repo names or folder paths as the plan shows them (`devkit nmclean --only app-one,app-two/node_modules`); `devclean --only` takes section names.
 
 If a script reports that there is no interactive terminal (Git Bash outside VS Code can do this), use the VS Code terminal or PowerShell, or add `--yes` after reviewing the plan.
 
 ### Updating the registry token
 
-`token` takes the new token as its first argument. Tokens are always shown masked, as in the example below.
+Run `devkit token` and paste the token at the hidden terminal prompt. Then review the plan, pick files and confirm. Use `devkit token --dry-run` to see the plan without writing.
 
-```bash
-devkit token npm_NewToken1234XyZ9 --dry-run   # lists every .npmrc and what would change
-devkit token npm_NewToken1234XyZ9             # the same list, then pick files and type "y" to write them
-```
-
-```
-  do    app/.npmrc                 //npm.example.com/  npm_************a1b2  ->  npm_************XyZ9
-  keep  tools/.npmrc               WARNING: 2 _authToken lines found; update this file by hand
-...
-ok    app/.npmrc                   now npm_************XyZ9
-```
-
-The token you type is saved in your shell history. Clear that line from the history if other people use the machine.
+The token is not placed in the command line or shell history. A terminal is required even with `--yes`.
+Tokens are shown masked in the plan and log. The former `devkit token <token>` interface is no longer accepted.
 
 ## Workflow
 

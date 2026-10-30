@@ -82,6 +82,7 @@ export function testContext({
     },
     paint: painter(colored),
     confirm: async () => answer,
+    askToken: async () => 'npm_NewNewNewNew2222',
 
     /**
      * Pick from a list without a terminal.
